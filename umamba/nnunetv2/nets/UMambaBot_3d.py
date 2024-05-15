@@ -51,20 +51,77 @@ class MambaLayer(nn.Module):
                 expand=expand,    # Block expansion factor
         )
     
+    # @autocast(enabled=False)
+    # def forward(self, x):
+    #     if x.dtype == torch.float16:
+    #         x = x.type(torch.float32)
+    #     B, C = x.shape[:2]
+    #     assert C == self.dim
+    #     n_tokens = x.shape[2:].numel()
+    #     img_dims = x.shape[2:]
+    #     x_flat = x.reshape(B, C, n_tokens).transpose(-1, -2)
+    #     x_norm = self.norm(x_flat)
+    #     x_mamba = self.mamba(x_norm)
+    #     out = x_mamba.transpose(-1, -2).reshape(B, C, *img_dims)
+
+    #     return out
+
+    def fuseCoeff(self, coeffs):
+      fusedCooef = []
+      for i in range(len(coeffs)):
+          # The first values in each decomposition is the apprximation values of the top level
+          if i == 0:
+              fusedCooef.append(coeffs[i].flatten())
+          else:
+              fusedCooef.append(coeffs[i]['ada'].flatten())
+              fusedCooef.append(coeffs[i]['aad'].flatten())
+              fusedCooef.append(coeffs[i]['add'].flatten())
+              fusedCooef.append(coeffs[i]['daa'].flatten())
+              fusedCooef.append(coeffs[i]['dad'].flatten())
+              fusedCooef.append(coeffs[i]['dda'].flatten())
+              fusedCooef.append(coeffs[i]['ddd'].flatten())
+
+      concatenated_coeffs = torch.cat(fusedCooef)
+      
+      return concatenated_coeffs
+  
+    def recCoeff(self, wave, num_coeffs, coeffs_shape):
+      out_x = torch.split(wave, num_coeffs, dim=0)
+      rec_x = [out_x[0].reshape(coeffs_shape)]
+      c1 = out_x[1].reshape(coeffs_shape)
+      c2 = out_x[2].reshape(coeffs_shape)
+      c3 = out_x[3].reshape(coeffs_shape)
+      c4 = out_x[4].reshape(coeffs_shape)
+      c5 = out_x[5].reshape(coeffs_shape)
+      c6 = out_x[6].reshape(coeffs_shape)
+      c7 = out_x[7].reshape(coeffs_shape)
+      dictobj = {'aad': c1, 'ada': c2, 'add': c3, 'daa': c4, 'dad': c5, 'dda': c6, 'ddd': c7}
+      rec_x.append(dictobj)
+      return rec_x
+
+    # 只轉換三圍
     @autocast(enabled=False)
     def forward(self, x):
-        if x.dtype == torch.float16:
-            x = x.type(torch.float32)
-        B, C = x.shape[:2]
-        assert C == self.dim
-        n_tokens = x.shape[2:].numel()
-        img_dims = x.shape[2:]
-        x_flat = x.reshape(B, C, n_tokens).transpose(-1, -2)
-        x_norm = self.norm(x_flat)
-        x_mamba = self.mamba(x_norm)
-        out = x_mamba.transpose(-1, -2).reshape(B, C, *img_dims)
-
-        return out
+      if x.dtype == torch.float16:
+          x = x.type(torch.float32)
+      B, C = x.shape[:2]
+      assert C == self.dim
+      wavelet = 'db1' #db參數改這(2.4.8.20)
+      level = 1
+      coeffs = ptwt.wavedec3(x, wavelet, level=level)
+      num_coeffs = coeffs[0].numel()
+      coeffs_shape = coeffs[0].shape
+      x_wavelet = self.fuseCoeff(coeffs)
+      n_tokens = int(len(x_wavelet)/(B*C))
+      x_wavelet = x_wavelet.to('cuda')
+      x_flat = x_wavelet.reshape(B, C, n_tokens).transpose(-1, -2)
+      x_norm = self.norm(x_flat)
+      x_mamba = self.mamba(x_norm)
+      out = x_mamba.transpose(-1, -2).reshape(-1)
+      rec_x = self.recCoeff(out, num_coeffs, coeffs_shape)
+      rec_coeff = ptwt.waverec3(rec_x, wavelet)
+      rec_coeff = torch.nn.functional.interpolate(rec_coeff, size=x.shape[2:], mode='nearest')
+      return rec_coeff
 
 
 class BasicResBlock(nn.Module):
