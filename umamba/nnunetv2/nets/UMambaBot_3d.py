@@ -107,7 +107,7 @@ class MambaLayer(nn.Module):
           x = x.type(torch.float32)
       B, C = x.shape[:2]
       assert C == self.dim
-      wavelet = 'db4' #db參數改這(2.4.8.20)
+      wavelet = 'db1' #db參數改這(2.4.8.20)
       level = 1
       coeffs = ptwt.wavedec3(x, wavelet, level=level)
       num_coeffs = coeffs[0].numel()
